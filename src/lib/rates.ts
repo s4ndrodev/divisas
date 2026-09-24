@@ -5,6 +5,7 @@ import type {
   RateMap,
   RatesData,
   Snapshot,
+  Source,
 } from "@/types/rates";
 
 const TZ_CUBA = "America/Havana";
@@ -98,17 +99,50 @@ export async function getRates(): Promise<RatesData | null> {
   return (await redis.get<RatesData>(RATES_KEY)) ?? null;
 }
 
+export interface UpdateResult {
+  data: RatesData;
+  /** Fuentes cuyo fetch falló en esta corrida (se mantuvo el último valor conocido). */
+  failedSources: Array<{ source: Source; error: string }>;
+}
+
 /**
  * Reemplaza al workflow de GitHub Actions: obtiene ElToque + BCC, calcula
  * historial/snapshot igual que el script Python original, y persiste en Redis.
+ *
+ * Cada fuente se pide por separado: si una falla (API caída, token vencido,
+ * etc.) no tumba la otra — se conserva el último valor guardado en Redis para
+ * la fuente que falló y se sigue con la que sí respondió.
  */
-export async function updateRates(): Promise<RatesData> {
-  const [eltoqueTasas, bccTasas] = await Promise.all([
+export async function updateRates(): Promise<UpdateResult> {
+  const anterior = await getRates();
+
+  const [eltoqueResult, bccResult] = await Promise.allSettled([
     fetchElToque(),
     fetchBcc(),
   ]);
 
-  const anterior = await getRates();
+  const failedSources: Array<{ source: Source; error: string }> = [];
+
+  const eltoqueTasas =
+    eltoqueResult.status === "fulfilled" ? eltoqueResult.value : anterior?.eltoque ?? {};
+  if (eltoqueResult.status === "rejected") {
+    failedSources.push({ source: "eltoque", error: String(eltoqueResult.reason) });
+    console.error("Fallo al obtener ElToque, se mantiene el último valor:", eltoqueResult.reason);
+  }
+
+  const bccTasas =
+    bccResult.status === "fulfilled" ? bccResult.value : anterior?.bcc ?? {};
+  if (bccResult.status === "rejected") {
+    failedSources.push({ source: "bcc", error: String(bccResult.reason) });
+    console.error("Fallo al obtener BCC, se mantiene el último valor:", bccResult.reason);
+  }
+
+  if (eltoqueResult.status === "rejected" && bccResult.status === "rejected") {
+    throw new Error(
+      `Fallaron ambas fuentes — elToque: ${eltoqueResult.reason}; BCC: ${bccResult.reason}`,
+    );
+  }
+
   const fechaHoy = fechaHoyCuba();
 
   const snapshotActual = anterior?.snapshot;
@@ -138,5 +172,5 @@ export async function updateRates(): Promise<RatesData> {
   };
 
   await redis.set(RATES_KEY, resultado);
-  return resultado;
+  return { data: resultado, failedSources };
 }
