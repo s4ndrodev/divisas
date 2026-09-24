@@ -13,8 +13,15 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const data = await updateRates();
-    return NextResponse.json({ ok: true, fecha: data.fecha, actualizadoEn: data.actualizadoEn });
+    const { data, failedSources } = await updateRates();
+    // 200 aunque haya fallado una fuente: la actualización en sí fue exitosa
+    // para la que sí respondió. failedSources te dice cuál quedó con el valor anterior.
+    return NextResponse.json({
+      ok: true,
+      fecha: data.fecha,
+      actualizadoEn: data.actualizadoEn,
+      failedSources,
+    });
   } catch (err) {
     console.error("Error actualizando tasas:", err);
     return NextResponse.json(
